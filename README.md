@@ -30,6 +30,12 @@ Full video-player sync comes after that.
     "does not allow embedding" notice after a 10-second load timeout.
   - Live link sharing runs over free PeerJS Cloud (room code = peer id,
     same as the static app), with a 15-second server poll as the fallback.
+- **Web proxy (Phase 1, server side)** — `GET /proxy?url=<page>` fetches
+  a public page, strips ad scripts from known ad hosts, and injects a
+  scroll/link sync script so both phones can browse it together. Full
+  details, the postMessage protocol and the honest limits in
+  [docs/PROXY.md](docs/PROXY.md). The room-page side (Phase 2) is not
+  built yet.
 - **Database** — SQLite locally; Postgres via `DATABASE_URL` (Neon, free, no
   card) on deploy. Sessions/cache/queue all use the database driver, never
   the filesystem (free hosts have ephemeral disks).
@@ -53,7 +59,7 @@ Open http://127.0.0.1:8000, create an account, create a room.
 php artisan test
 ```
 
-32 tests (auth, rooms, weblinks, URL normalisation). All must pass.
+62 tests (auth, rooms, weblinks, URL normalisation, proxy). All must pass.
 
 ## Deploy
 
