@@ -3,7 +3,7 @@ FROM php:8.3-apache
 
 # System deps + PHP extensions Laravel needs (pgsql for Neon, sqlite for local dev, zip for Composer)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git unzip libpq-dev libzip-dev \
+        git unzip libpq-dev libsqlite3-dev libzip-dev \
     && docker-php-ext-install pdo pdo_pgsql pdo_sqlite zip \
     && a2enmod rewrite \
     && rm -rf /var/lib/apt/lists/*
@@ -23,7 +23,11 @@ COPY composer.json composer.lock ./
 RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist
 
 COPY . .
+# Dummy key only so build-time artisan commands can boot; the real key
+# comes from the environment at runtime (Northflank dashboard).
+ENV APP_KEY=base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 RUN composer dump-autoload --optimize \
+    && php artisan package:discover --ansi \
     && chown -R www-data:www-data storage bootstrap/cache \
     && chmod -R 775 storage bootstrap/cache
 
