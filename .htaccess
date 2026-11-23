@@ -1,0 +1,21 @@
+# Cinema for Two — InfinityFree (shared hosting, no shell / no composer)
+# The app lives in htdocs/ itself. InfinityFree's free plan does not let
+# you change the document root to public/, so this file routes every
+# request into Laravel's public/ directory. public/.htaccess (Laravel's
+# own) handles the front controller from there.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Requests already under /public/ pass through unchanged.
+    RewriteRule ^public/ - [L]
+
+    # Everything else goes to public/.
+    RewriteRule ^(.*)$ public/$1 [L]
+</IfModule>
+
+# Belt and braces: never serve the environment file, even if mod_rewrite
+# is ever off. (The rewrite above already routes /.env to public/.env,
+# which does not exist, so this is a second lock on the same door.)
+<FilesMatch "^\.env">
+    Require all denied
+</FilesMatch>
