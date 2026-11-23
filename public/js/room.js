@@ -31,7 +31,9 @@
 
     var viewer = document.getElementById('webViewer');
     var webEmpty = document.getElementById('webEmpty');
+    var webAddressText = document.getElementById('webAddressText');
     var blockedNotice = document.getElementById('blockedNotice');
+    var blockedDismiss = document.getElementById('blockedDismissBtn');
     var openInBrowser = document.getElementById('openInBrowser');
     var blockedOpenLink = document.getElementById('blockedOpenLink');
     var shelf = document.getElementById('weblinkShelf');
@@ -57,7 +59,8 @@
     }
 
     function setPresence(state, text) {
-        var dot = state === 'live' ? 'bg-presence' : state === 'offline' ? 'bg-errorText' : 'bg-primary';
+        // Sync pill dot is amber like the static app's presence pill.
+        var dot = state === 'live' ? 'bg-primary-container' : state === 'offline' ? 'bg-error' : 'bg-primary-container';
         pillDot.className = 'w-1.5 h-1.5 rounded-full ' + dot + (state === 'connecting' ? ' animate-pulse' : '');
         pillText.textContent = text;
     }
@@ -79,6 +82,7 @@
         openInBrowser.classList.remove('opacity-50', 'pointer-events-none');
         openInBrowser.href = url;
         blockedOpenLink.href = url;
+        if (webAddressText) webAddressText.textContent = url;
         if (viewer.getAttribute('src') === url) {
             reloadViewer();
         } else {
@@ -104,6 +108,12 @@
         blockedNotice.classList.add('hidden');
     });
 
+    if (blockedDismiss) {
+        blockedDismiss.addEventListener('click', function () {
+            blockedNotice.classList.add('hidden');
+        });
+    }
+
     function shelfHas(id) {
         return !!shelf.querySelector('li[data-id="' + id + '"]');
     }
@@ -114,25 +124,25 @@
         if (shelfHas(link.id)) return;
         var li = document.createElement('li');
         li.dataset.id = String(link.id);
-        li.className = 'bg-card border border-hairline rounded-[10px] px-4 py-3 flex items-center justify-between gap-3';
+        li.className = 'bg-canvas-background hover:bg-surface-control border border-hairline-border hover:border-primary-container/40 transition rounded-[6px] px-4 py-3 flex items-center justify-between gap-3';
         var div = document.createElement('div');
         div.className = 'min-w-0';
         var a = document.createElement('a');
         a.href = link.url;
         a.target = '_blank';
         a.rel = 'noopener';
-        a.className = 'text-sm text-textPrimary truncate block hover:text-primary';
-        a.textContent = link.url;
+        a.className = 'text-xs font-semibold text-text-primary truncate block hover:text-primary-container';
+        a.textContent = link.url.replace(/^https?:\/\//, '').split('/')[0] || link.url;
         var p = document.createElement('p');
-        p.className = 'text-xs text-textMuted mt-0.5';
-        p.textContent = 'Shared by ' + (link.shared_by || 'Someone') + ' · just now';
+        p.className = 'text-[11px] text-text-muted truncate mt-0.5';
+        p.textContent = link.url + ' · Shared by ' + (link.shared_by || 'Someone') + ' · just now';
         div.appendChild(a);
         div.appendChild(p);
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.dataset.url = link.url;
         btn.dataset.id = String(link.id);
-        btn.className = 'weblink-open px-3 h-8 rounded-md bg-control border border-hairline text-xs shrink-0';
+        btn.className = 'weblink-open px-2.5 py-1.5 rounded-[6px] bg-surface-control hover:bg-surface-variant border border-hairline-border text-text-primary text-[11px] font-semibold shrink-0';
         btn.textContent = 'Open';
         li.appendChild(div);
         li.appendChild(btn);

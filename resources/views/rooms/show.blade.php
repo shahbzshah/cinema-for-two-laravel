@@ -11,88 +11,89 @@
 
         <div class="flex flex-wrap items-center justify-between gap-3">
             <div>
-                <h1 class="font-display text-3xl">Room <span class="font-mono tracking-widest">{{ $room->code }}</span></h1>
-                <p class="text-textSecondary text-sm mt-1">Created by {{ $room->owner->name }} · share the code with your partner to join.</p>
+                <h1 class="font-headline-md text-headline-md italic text-text-primary tracking-tight">Room <span class="font-code-timecode text-primary-container tracking-wider">{{ $room->code }}</span></h1>
+                <p class="text-text-secondary text-sm mt-1">Created by {{ $room->owner->name }} · share the code with your partner to join.</p>
             </div>
-            <span id="syncPill" class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-primary/25 bg-primary/10 text-xs text-primary">
-                <span id="syncPillDot" class="w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
+            <span id="syncPill" class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-primary-container/25 bg-primary-container/10 text-xs font-medium text-primary-container">
+                <span id="syncPillDot" class="w-1.5 h-1.5 rounded-full bg-primary-container animate-pulse"></span>
                 <span id="syncPillText">Connecting…</span>
             </span>
         </div>
 
         {{-- Shared mini-browser --}}
         <section class="mt-6">
-            <h2 class="text-sm font-medium text-textPrimary">Web — browse together</h2>
-            <p class="text-textSecondary text-xs mt-1">
+            <h2 class="font-label-sm text-label-sm text-text-muted uppercase tracking-wider">Web — browse together</h2>
+            <p class="text-[11px] text-text-muted mt-2 leading-relaxed">
                 Paste a link and both phones open the same page. Each phone scrolls and taps on its own screen;
                 sharing a new link moves the room together.
             </p>
 
             <form id="weblinkForm" class="mt-3 flex gap-2">
-                <input id="weblinkInput" name="url" type="text" required placeholder="Paste a link — example.com or https://example.com"
+                <input id="weblinkInput" name="url" type="text" required placeholder="Paste any web page link…"
                     value="{{ $current?->url }}"
-                    class="flex-1 h-10 px-3 rounded-md bg-control border border-hairline text-textPrimary placeholder:text-textMuted focus:outline-none focus:border-primary">
-                <button type="submit" class="px-4 h-10 rounded-md bg-primary text-canvas text-sm font-medium shrink-0">Go</button>
+                    class="flex-1 min-w-0 h-10 px-3.5 rounded-[6px] bg-canvas-background border border-hairline-border text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-primary-container/60 transition">
+                <button type="submit" class="h-10 px-4 rounded-[6px] bg-primary-container hover:bg-primary text-canvas-background font-semibold text-sm transition cursor-pointer shrink-0">Share Web Page</button>
             </form>
 
-            <div id="newLinkBanner" class="hidden mt-3 rounded-[10px] border border-primary/45 bg-card px-4 py-3 text-sm flex flex-wrap items-center justify-between gap-3">
-                <span><span class="text-primary font-medium">Your partner shared a link.</span> <span id="newLinkBannerText" class="text-textSecondary"></span></span>
-                <button id="newLinkBannerOpen" type="button" class="px-3 h-8 rounded-md bg-primary text-canvas text-xs font-medium shrink-0">Open it</button>
+            <div id="newLinkBanner" class="hidden mt-3 rounded-[6px] border border-primary-container/45 bg-surface-card px-4 py-3 text-sm flex flex-wrap items-center justify-between gap-3">
+                <span><span class="text-primary-container font-medium">Your partner shared a link.</span> <span id="newLinkBannerText" class="text-text-secondary"></span></span>
+                <button id="newLinkBannerOpen" type="button" class="px-3 h-8 rounded-[6px] bg-primary-container hover:bg-primary text-canvas-background text-xs font-semibold shrink-0">Open it</button>
             </div>
 
-            <div id="webViewerWrap" class="mt-3 relative w-full aspect-video bg-black rounded-[10px] border border-hairline overflow-hidden">
-                <div id="webEmpty" class="absolute inset-0 flex flex-col items-center justify-center text-center p-6 {{ $current ? 'hidden' : '' }}">
-                    <p class="font-display text-xl text-textPrimary">No page open yet</p>
-                    <p class="text-textSecondary text-sm max-w-md mt-1.5">Paste a link above, or pick one from the shared links below.</p>
+            <div id="webViewerWrap" class="mt-3 w-full aspect-video bg-black rounded-[10px] border border-hairline-border overflow-hidden flex flex-col">
+                <div class="flex items-center gap-2 px-3 py-2 border-b border-hairline-border bg-surface-card shrink-0">
+                    <span id="webAddressText" class="flex-1 min-w-0 truncate font-code-timecode text-[11px] text-text-secondary">{{ $current?->url }}</span>
+                    <button id="syncPageBtn" type="button" class="px-2.5 py-1.5 rounded-[6px] bg-surface-control hover:bg-surface-variant border border-hairline-border text-text-primary text-[11px] font-semibold transition cursor-pointer shrink-0">Sync page</button>
+                    <a id="openInBrowser" href="{{ $current?->url ?? '#' }}" target="_blank" rel="noopener"
+                       class="px-2.5 py-1.5 rounded-[6px] bg-primary-container hover:bg-primary text-canvas-background text-[11px] font-semibold transition cursor-pointer shrink-0 {{ $current ? '' : 'opacity-50 pointer-events-none' }}">Open in browser</a>
                 </div>
-                {{-- sandbox: scripts + same-origin so pages work, but no top-navigation so a page can never break out of the app --}}
-                <iframe id="webViewer" title="Shared mini-browser" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" referrerpolicy="no-referrer"
-                    src="{{ $current?->url }}" class="w-full h-full bg-white {{ $current ? '' : 'hidden' }}"></iframe>
-                <div id="blockedNotice" class="hidden absolute inset-x-4 bottom-4 rounded-md bg-card border border-errorText/45 px-4 py-3 text-sm">
-                    <span class="text-errorText font-medium">This site does not allow embedding.</span>
-                    <span class="text-textSecondary"> It refuses to show inside an app — open it in your browser instead.</span>
-                    <a id="blockedOpenLink" href="{{ $current?->url }}" target="_blank" rel="noopener" class="text-primary underline underline-offset-2">Open in browser</a>
+                <div id="blockedNotice" class="hidden px-4 py-2.5 bg-error-container/30 border-b border-error/20 text-[11px] text-text-primary flex items-center justify-between gap-3 shrink-0">
+                    <span><span class="text-error font-medium">This site does not allow embedding.</span><span class="text-text-secondary"> It refuses to show inside an app — open it in your browser instead.</span></span>
+                    <span class="flex items-center gap-2 shrink-0">
+                        <a id="blockedOpenLink" href="{{ $current?->url }}" target="_blank" rel="noopener" class="text-primary-container underline underline-offset-2">Open in browser</a>
+                        <button id="blockedDismissBtn" type="button" class="text-error font-bold px-1.5 cursor-pointer">✕</button>
+                    </span>
                 </div>
-            </div>
-
-            <div class="mt-3 flex flex-wrap items-center gap-2">
-                <button id="syncPageBtn" type="button" class="px-4 h-9 rounded-md bg-control border border-hairline text-sm">Sync page</button>
-                <a id="openInBrowser" href="{{ $current?->url ?? '#' }}" target="_blank" rel="noopener"
-                   class="px-4 h-9 inline-flex items-center rounded-md bg-control border border-hairline text-sm {{ $current ? '' : 'opacity-50 pointer-events-none' }}">Open in browser</a>
-                <span class="text-xs text-textMuted">Sync page reloads the shared link on both phones.</span>
+                <div class="relative flex-1 min-h-0 bg-canvas-background">
+                    <div id="webEmpty" class="absolute inset-0 flex flex-col items-center justify-center text-center p-6 {{ $current ? 'hidden' : '' }}">
+                        <p class="font-headline-md text-headline-md italic text-text-primary">No page open yet</p>
+                        <p class="text-text-secondary text-sm max-w-md mt-1.5">Paste a link above, or pick one from the shared links below.</p>
+                    </div>
+                    {{-- sandbox: scripts + same-origin so pages work, but no top-navigation so a page can never break out of the app --}}
+                    <iframe id="webViewer" title="Shared mini-browser" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" referrerpolicy="no-referrer"
+                        src="{{ $current?->url }}" class="absolute inset-0 w-full h-full bg-white {{ $current ? '' : 'hidden' }}"></iframe>
+                </div>
             </div>
         </section>
 
         {{-- Shared links shelf --}}
         <section class="mt-8">
-            <h2 class="text-sm font-medium text-textPrimary">Shared links</h2>
+            <h2 class="font-label-sm text-label-sm text-text-muted uppercase tracking-wider">Shared links</h2>
             <ul id="weblinkShelf" class="mt-3 space-y-2">
                 @forelse ($weblinks as $link)
-                    <li data-id="{{ $link->id }}" class="bg-card border border-hairline rounded-[10px] px-4 py-3 flex items-center justify-between gap-3">
+                    <li data-id="{{ $link->id }}" class="bg-canvas-background hover:bg-surface-control border border-hairline-border hover:border-primary-container/40 transition rounded-[6px] px-4 py-3 flex items-center justify-between gap-3">
                         <div class="min-w-0">
-                            <a href="{{ $link->url }}" target="_blank" rel="noopener" class="text-sm text-textPrimary truncate block hover:text-primary">{{ $link->url }}</a>
-                            <p class="text-xs text-textMuted mt-0.5">Shared by {{ $link->sharer?->name ?? 'Someone' }} · {{ $link->created_at->diffForHumans() }}</p>
+                            <a href="{{ $link->url }}" target="_blank" rel="noopener" class="text-xs font-semibold text-text-primary truncate block hover:text-primary-container">{{ parse_url($link->url, PHP_URL_HOST) ?? $link->url }}</a>
+                            <p class="text-[11px] text-text-muted truncate mt-0.5">{{ $link->url }} · Shared by {{ $link->sharer?->name ?? 'Someone' }} · {{ $link->created_at->diffForHumans() }}</p>
                         </div>
                         <button type="button" data-url="{{ $link->url }}" data-id="{{ $link->id }}"
-                            class="weblink-open px-3 h-8 rounded-md bg-control border border-hairline text-xs shrink-0">Open</button>
+                            class="weblink-open px-2.5 py-1.5 rounded-[6px] bg-surface-control hover:bg-surface-variant border border-hairline-border text-text-primary text-[11px] font-semibold shrink-0">Open</button>
                     </li>
                 @empty
-                    <li id="weblinkShelfEmpty" class="text-textSecondary text-sm bg-card border border-hairline rounded-[10px] px-4 py-4">
-                        No links shared yet — the first link either of you shares shows up here for both of you.
-                    </li>
+                    <li id="weblinkShelfEmpty" class="text-[11px] text-text-muted">No links shared yet — paste one above.</li>
                 @endforelse
             </ul>
         </section>
 
-        <section class="mt-8 bg-card border border-hairline rounded-[10px] px-4 py-4">
-            <h2 class="text-sm font-medium text-textPrimary">Live video &amp; voice</h2>
-            <p class="text-textSecondary text-sm mt-1">
+        <section class="mt-8 bg-surface-card border border-hairline-border rounded-[10px] px-4 py-4">
+            <h2 class="font-label-sm text-label-sm text-text-muted uppercase tracking-wider">Live video &amp; voice</h2>
+            <p class="text-text-secondary text-sm mt-2 leading-relaxed">
                 Video calling arrives in the next version — the room shell above already connects you peer-to-peer
-                (the green “Live Synced” pill) so shared links travel instantly. Until then, this room is the shared browser.
+                (the amber “Live Synced” pill) so shared links travel instantly. Until then, this room is the shared browser.
             </p>
         </section>
 
-        <div id="roomToast" class="hidden fixed left-1/2 -translate-x-1/2 bottom-6 z-50 px-4 py-2.5 rounded-full border border-primary/45 bg-card text-sm"></div>
+        <div id="roomToast" class="hidden fixed left-1/2 -translate-x-1/2 top-4 z-50 px-4 py-2.5 rounded-full border border-primary-container/45 bg-surface-card text-text-primary text-xs sm:text-sm font-medium"></div>
     </div>
 @endsection
 
