@@ -4,15 +4,27 @@
  * Live sync stays on PeerJS Cloud, same approach as the static app:
  * the room code is the peer id (c2t-<CODE>), the first side to open the
  * room hosts it, the other joins as a guest. The data channel carries
- * only weblink events — shared links and "sync page". Video/voice
- * calling arrives in v2.
+ * weblink events — shared links, "sync page", and scroll positions.
+ * Video/voice calling arrives in v2.
+ *
+ * Synced browsing ("Browse together"): with the toggle on, shared pages
+ * load through this app's own /proxy, which re-serves them with a sync
+ * script inside — scrolling and link taps then move on both phones.
+ * The toggle is per-device (both phones turn it on); the weblink record
+ * always keeps the ORIGINAL url, and the proxy wrap happens at mount
+ * time. The /proxy route is behind auth, so synced browsing needs the
+ * user signed in here — everyone on this page already is. If the proxy
+ * refuses a page, the room falls back to the direct URL and says so.
  *
  * Honest limits, by design:
- * - Each phone scrolls and taps inside the iframe on its own screen.
- *   Cross-origin scroll/click sync is impossible: the browser will not
- *   let this page read scroll position or clicks inside another site.
+ * - With the toggle off, each phone scrolls and taps inside the iframe
+ *   on its own screen. Cross-origin scroll/click sync is impossible:
+ *   the browser will not let this page read scroll position or clicks
+ *   inside another site — only the proxied page reports them.
  * - Some sites refuse to embed at all (X-Frame-Options / CSP). A 10s
  *   load timeout shows the blocked notice with an Open-in-browser link.
+ *   (Through the proxy they load anyway — the proxy strips those
+ *   headers — unless the proxy itself refuses the page.)
  * - If PeerJS is unreachable, links still save to the room (server) and
  *   the 15s poll picks them up; the banner offers them instead of an
  *   instant switch.
@@ -25,9 +37,15 @@
 
     var roomCode = root.dataset.roomCode;
     var userName = root.dataset.userName;
+    var proxyUrl = root.dataset.proxyUrl || '/proxy';
     var weblinksUrl = root.dataset.weblinksUrl;
     var weblinkStoreUrl = root.dataset.weblinkStoreUrl;
     var csrf = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+
+    // Synced-browsing pure helpers (public/js/room-sync.js, loaded before
+    // this file). If that script failed to load, synced mode stays off
+    // and the room behaves exactly as before.
+    var sync = (typeof window !== 'undefined' && window.CinemaSync) || null;
 
     var viewer = document.getElementById('webViewer');
     var webEmpty = document.getElementById('webEmpty');
@@ -51,6 +69,25 @@
     var toastTimer = null;
     var pendingBannerLink = null;
 
+    // Synced browsing state. syncEnabled is per-device (default OFF —
+    // both phones turn it on); currentUrl always keeps the ORIGINAL url
+    // while currentFrameSrc is what the iframe actually loads (proxied
+    // when sync is on). lastWebScrollAt is when we last sent a scroll
+    // position INTO the frame — the echo guard for c2t-scroll reports.
+    var syncEnabled = false;
+    var currentFrameSrc = viewer.getAttribute('src') || '';
+    var currentProxied = false;
+    var lastWebScrollAt = 0;
+    var proxyFallbackArmed = false;
+
+    // Diagnostic handle (same spirit as the static app's ?debug=1 panel):
+    // the harness and a ?debug check can see the last scroll in each
+    // direction and drive an incoming PeerJS message. Read-only except
+    // for handlePeerMessage, which is the same handler the live
+    // connection calls.
+    var roomDebug = { lastFrameScroll: null, lastPartnerScroll: null, lastLinkTap: null, handlePeerMessage: null };
+    if (typeof window !== 'undefined') window.__cinemaRoom = roomDebug;
+
     function showToast(msg) {
         toastEl.textContent = msg;
         toastEl.classList.remove('hidden');
@@ -73,6 +110,11 @@
         }, 10000);
     }
 
+    function frameSrcFor(url) {
+        if (sync && syncEnabled) return sync.proxiedWeblinkSrc(url, true, proxyUrl);
+        return url;
+    }
+
     function loadViewer(url, id) {
         if (!url) return;
         currentUrl = url;
@@ -83,10 +125,21 @@
         openInBrowser.href = url;
         blockedOpenLink.href = url;
         if (webAddressText) webAddressText.textContent = url;
-        if (viewer.getAttribute('src') === url) {
+        // The sandbox decides whether the framed page may touch its own
+        // storage. Set it BEFORE any src assignment below — changing it
+        // after the page loads would reload the frame. Synced mode wraps
+        // the page through /proxy (the weblink record still stores the
+        // original URL) — the sandbox decision runs on the FINAL iframe
+        // src origin, so a proxied page gets the proxied tokens.
+        var frameSrc = frameSrcFor(url);
+        if (sync) viewer.setAttribute('sandbox', sync.sandboxTokensForSrc(frameSrc, proxyUrl, window.location.origin));
+        currentFrameSrc = frameSrc;
+        currentProxied = !!(sync && sync.isProxiedSrc(frameSrc, proxyUrl));
+        proxyFallbackArmed = currentProxied;
+        if (viewer.getAttribute('src') === frameSrc) {
             reloadViewer();
         } else {
-            viewer.setAttribute('src', url);
+            viewer.setAttribute('src', frameSrc);
         }
         armBlockedTimer();
         var input = document.getElementById('weblinkInput');
@@ -94,18 +147,41 @@
     }
 
     function reloadViewer() {
-        if (!currentUrl) return;
+        if (!currentFrameSrc) return;
         try {
             viewer.contentWindow.location.reload();
         } catch (e) {
-            viewer.setAttribute('src', currentUrl);
+            viewer.setAttribute('src', currentFrameSrc);
         }
         armBlockedTimer();
+    }
+
+    // The proxy answers a refused page (bad URL, SSRF block, upstream
+    // error, too large) with a plain error page titled "Cinema for Two
+    // — proxy". Same-origin, so the parent can read it. When it shows
+    // up, fall back to the direct URL for this page and say so plainly.
+    function isProxyErrorPage() {
+        try {
+            var doc = viewer.contentDocument;
+            if (!doc) return false;
+            return doc.title === 'Cinema for Two — proxy';
+        } catch (e) {
+            return false;
+        }
     }
 
     viewer.addEventListener('load', function () {
         clearTimeout(blockedTimer);
         blockedNotice.classList.add('hidden');
+        if (proxyFallbackArmed && currentProxied && isProxyErrorPage()) {
+            proxyFallbackArmed = false;
+            currentProxied = false;
+            if (sync) viewer.setAttribute('sandbox', sync.sandboxTokensForSrc(currentUrl, proxyUrl, window.location.origin));
+            currentFrameSrc = currentUrl;
+            viewer.setAttribute('src', currentUrl);
+            armBlockedTimer();
+            showToast('Synced browsing could not load that page — showing it direct instead.');
+        }
     });
 
     if (blockedDismiss) {
@@ -150,12 +226,15 @@
     }
 
     // --- Sharing a link -------------------------------------------------
-    document.getElementById('weblinkForm').addEventListener('submit', function (e) {
-        e.preventDefault();
-        var input = document.getElementById('weblinkInput');
-        var url = input.value.trim();
-        if (!url) return;
-        fetch(weblinkStoreUrl, {
+    // One share flow for every path in: the form, a shelf "Open", a
+    // partner's banner tap, and a link tap inside a proxied page. It
+    // saves the link to the room (the record keeps the ORIGINAL url),
+    // mounts it (proxied when synced browsing is on), and tells the
+    // partner over PeerJS. Returns a promise of the saved link or null.
+    function shareLink(url) {
+        url = (url || '').trim();
+        if (!url) return Promise.resolve(null);
+        return fetch(weblinkStoreUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -171,9 +250,29 @@
                 addToShelf(link);
                 loadViewer(link.url, link.id);
                 sendPeer({ kind: 'weblink', id: link.id, url: link.url, by: userName });
+                return link;
             })
-            .catch(function (err) { showToast(err.message || 'Could not share that link.'); });
+            .catch(function (err) { showToast(err.message || 'Could not share that link.'); return null; });
+    }
+
+    document.getElementById('weblinkForm').addEventListener('submit', function (e) {
+        e.preventDefault();
+        var input = document.getElementById('weblinkInput');
+        shareLink(input.value);
     });
+
+    // "Browse together (synced)": wrap shared pages through /proxy so
+    // scrolling and link taps move on both phones. Flipping it re-mounts
+    // the page already open, in the new mode — no new weblink row, so
+    // the shelf stays clean. Both phones turn it on; the toggle is
+    // per-device and is not synced.
+    var syncToggle = document.getElementById('webSyncToggle');
+    if (syncToggle) {
+        syncToggle.addEventListener('change', function () {
+            syncEnabled = syncToggle.checked;
+            if (currentUrl) loadViewer(currentUrl, currentId);
+        });
+    }
 
     // Shelf "Open" moves the whole room to that link.
     shelf.addEventListener('click', function (e) {
@@ -199,6 +298,53 @@
         sendPeer({ kind: 'weblink', id: pendingBannerLink.id, url: pendingBannerLink.url, by: userName });
         pendingBannerLink = null;
     });
+
+    // --- Synced browsing: messages from the proxied page --------------
+    // Accepted ONLY from our own origin AND only from our iframe's
+    // window — the proxy is same-origin with this app, so the origin
+    // check is the boundary, and a message from any other frame is
+    // ignored. The handler is NOT gated on the toggle: a page mounted
+    // while sync was on keeps reporting until it is replaced, and the
+    // origin + source check is the security boundary either way.
+    // No scroll-to {0,0} is sent on mount: a fresh page already starts
+    // at 0,0, and sending one could yank a partner who already scrolled.
+    window.addEventListener('message', function (event) {
+        if (!sync) return;
+        var frameWindow = viewer.contentWindow;
+        if (!sync.isProxyFrameMessage(event, window.location.origin, frameWindow)) return;
+        var d = event.data;
+        if (d.type === 'c2t-scroll') {
+            // Echo of a scroll we just applied? Ignore it, or the two
+            // phones chase each other in a loop.
+            if (sync.isWebScrollEcho(lastWebScrollAt, Date.now())) return;
+            var x = Number(d.x) || 0;
+            var y = Number(d.y) || 0;
+            roomDebug.lastFrameScroll = { x: x, y: y, at: Date.now() };
+            // Forward to the partner — only scrolls from THIS phone's frame.
+            sendPeer({ kind: 'web-scroll', x: x, y: y, by: userName });
+        } else if (d.type === 'c2t-link') {
+            var href = typeof d.href === 'string' ? d.href : '';
+            if (!href) return;
+            roomDebug.lastLinkTap = { href: href, at: Date.now() };
+            // A tap inside the page moves the whole room, like a fresh share.
+            shareLink(href);
+        }
+    });
+
+    // Send a scroll position INTO the proxied page. targetOrigin is our
+    // own origin, never '*'. Records the send time first, so the echo
+    // guard catches the frame's own report of the jump.
+    function postWebScrollTo(x, y) {
+        var win = viewer.contentWindow;
+        if (!win) return false;
+        lastWebScrollAt = Date.now();
+        try {
+            win.postMessage({ type: 'c2t-scroll-to', x: Number(x) || 0, y: Number(y) || 0 }, window.location.origin);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
 
     // --- Poll fallback (PeerJS down? links still arrive) ---------------
     var knownIds = new Set();
@@ -230,22 +376,38 @@
         try { conn.send(msg); return true; } catch (e) { return false; }
     }
 
+    // One handler for every PeerJS message, live or simulated. It is
+    // also exposed on window.__cinemaRoom so a diagnostic check (or the
+    // harness) can drive an incoming message without a second phone.
+    function handlePeerMessage(msg) {
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.kind === 'weblink' && msg.url) {
+            if (msg.id) knownIds.add(String(msg.id));
+            addToShelf({ id: msg.id || 0, url: msg.url, shared_by: msg.by });
+            loadViewer(msg.url, msg.id || null);
+            showToast((msg.by || 'Your partner') + ' shared a link.');
+        } else if (msg.kind === 'weblink-sync' && msg.url) {
+            loadViewer(msg.url, currentId);
+            showToast('Page synced by ' + (msg.by || 'your partner') + '.');
+        } else if (msg.kind === 'web-scroll') {
+            // The partner scrolled the shared page — move our frame to
+            // match. Only when the frame currently holds a proxied page;
+            // a direct page has no sync script inside it, so there is
+            // nothing to drive.
+            if (!currentProxied) return;
+            var x = Number(msg.x) || 0;
+            var y = Number(msg.y) || 0;
+            roomDebug.lastPartnerScroll = { x: x, y: y, at: Date.now() };
+            postWebScrollTo(x, y);
+        }
+    }
+    roomDebug.handlePeerMessage = handlePeerMessage;
+
     function attachConn(c) {
         if (conn) { try { conn.close(); } catch (e) {} }
         conn = c;
         conn.on('open', function () { setPresence('live', 'Live Synced'); });
-        conn.on('data', function (msg) {
-            if (!msg || typeof msg !== 'object') return;
-            if (msg.kind === 'weblink' && msg.url) {
-                if (msg.id) knownIds.add(String(msg.id));
-                addToShelf({ id: msg.id || 0, url: msg.url, shared_by: msg.by });
-                loadViewer(msg.url, msg.id || null);
-                showToast((msg.by || 'Your partner') + ' shared a link.');
-            } else if (msg.kind === 'weblink-sync' && msg.url) {
-                loadViewer(msg.url, currentId);
-                showToast('Page synced by ' + (msg.by || 'your partner') + '.');
-            }
-        });
+        conn.on('data', handlePeerMessage);
         conn.on('close', function () { setPresence('offline', 'Sync Offline'); });
         conn.on('error', function () { setPresence('offline', 'Sync Offline'); });
     }

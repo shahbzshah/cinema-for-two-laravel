@@ -6,6 +6,7 @@
     <div id="roomRoot"
          data-room-code="{{ $room->code }}"
          data-user-name="{{ auth()->user()->name }}"
+         data-proxy-url="{{ route('proxy', [], false) }}"
          data-weblinks-url="{{ route('rooms.weblinks.index', ['code' => $room->code]) }}"
          data-weblink-store-url="{{ route('rooms.weblinks.store', ['code' => $room->code]) }}">
 
@@ -24,9 +25,18 @@
         <section class="mt-6">
             <h2 class="font-label-sm text-label-sm text-text-muted uppercase tracking-wider">Web — browse together</h2>
             <p class="text-[11px] text-text-muted mt-2 leading-relaxed">
-                Paste a link and both phones open the same page. Each phone scrolls and taps on its own screen;
-                sharing a new link moves the room together.
+                Paste a link and both phones open the same page. With “Browse together (synced)” on, scrolling
+                and link taps move on both phones; with it off, each phone scrolls on its own.
+                Sharing a new link moves the room together either way.
             </p>
+
+            <label class="mt-3 flex items-start gap-2.5 cursor-pointer select-none">
+                <input id="webSyncToggle" type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 accent-primary-container cursor-pointer">
+                <span>
+                    <span class="block text-sm font-semibold text-text-primary">Browse together (synced)</span>
+                    <span class="block text-[11px] text-text-muted leading-relaxed mt-0.5">Pages load through this site (ads stripped) so scrolling and link taps stay in sync. Both phones turn it on — it is per-device, not shared. You are already signed in here, which synced browsing needs.</span>
+                </span>
+            </label>
 
             <form id="weblinkForm" class="mt-3 flex gap-2">
                 <input id="weblinkInput" name="url" type="text" required placeholder="Paste any web page link…"
@@ -59,8 +69,8 @@
                         <p class="font-headline-md text-headline-md italic text-text-primary">No page open yet</p>
                         <p class="text-text-secondary text-sm max-w-md mt-1.5">Paste a link above, or pick one from the shared links below.</p>
                     </div>
-                    {{-- sandbox: scripts + same-origin so pages work, but no top-navigation so a page can never break out of the app --}}
-                    <iframe id="webViewer" title="Shared mini-browser" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" referrerpolicy="no-referrer"
+                    {{-- sandbox: scripts + same-origin so pages work, but no top-navigation so a page can never break out of the app, and no pop-ups so shared sites cannot open ad windows --}}
+                    <iframe id="webViewer" title="Shared mini-browser" sandbox="allow-scripts allow-same-origin allow-forms" referrerpolicy="no-referrer"
                         src="{{ $current?->url }}" class="absolute inset-0 w-full h-full bg-white {{ $current ? '' : 'hidden' }}"></iframe>
                 </div>
             </div>
@@ -102,5 +112,6 @@
 @endpush
 
 @push('scripts')
+    <script src="{{ asset('js/room-sync.js') }}"></script>
     <script src="{{ asset('js/room.js') }}"></script>
 @endpush

@@ -6,11 +6,25 @@ phones can browse the same page together, with scrolling and link taps
 in sync, instead of each scrolling on their own.
 
 **Status:** server side done and tested (62 tests green, plus a live
-fetch of example.org verified). The static-app / room-page side — the
-parent frame that listens to the messages below and sends scroll
-positions back — is **Phase 2, not built yet**. Until then, `/proxy`
-works on its own (open it in a browser while signed in) but nothing
-in the room page uses it.
+fetch of example.org verified). **Phase 2 is built for the Laravel
+room page** (toggle, mount through /proxy, parent `message` listener,
+`web-scroll` over the room's PeerJS link, fallback to the direct URL
+— 66 PHP tests + 17 JS helper tests green, verified in a real
+headless browser against the live proxy). The static app has its own
+Phase 2 (?v=57, same protocol, cross-origin proxy). Until the toggle
+is on, `/proxy` works on its own (open it in a browser while signed
+in) but nothing in the room page uses it.
+
+**Synced browsing needs the user signed in to the Laravel app in the
+same browser.** The `/proxy` route sits behind `auth`, and the iframe
+carries the session cookie — that is what keeps the proxy from being
+an open relay. The room page itself is behind `auth` too, so anyone
+who can see the toggle is already signed in. If `/proxy` is
+unreachable or refuses a page (bad URL, SSRF block, upstream error,
+too large), the room falls back to the direct URL for that page and
+says so plainly (a toast: "Synced browsing could not load that page
+— showing it direct instead."). The toggle stays as the user set it;
+the next shared link tries the proxy again.
 
 ## How it works
 
@@ -122,9 +136,10 @@ after it (they are the echo of the jump, not the user scrolling).
   the proxied page submits to the original site and leaves the proxy.
   Recorded as a known limit below.
 - No reporting of the initial scroll position on load — the first
-  `c2t-scroll` arrives on the first scroll. The parent should send a
-  `c2t-scroll-to` with `{x: 0, y: 0}` when the page first mounts if
-  it wants a defined starting position.
+  `c2t-scroll` arrives on the first scroll. The room page deliberately
+  does NOT send a `c2t-scroll-to` with `{x: 0, y: 0}` on mount: a fresh
+  page already starts at 0,0, and sending one could yank a partner who
+  already scrolled.
 
 ## Honest limits
 
@@ -167,5 +182,16 @@ after it (they are the echo of the jump, not the user scrolling).
 - `app/Services/ProxyRewriter.php` — base injection, ad strip, sync script.
 - `app/Support/SsrfGuard.php` — private/reserved destination blocking.
 - `routes/web.php` — `GET /proxy` (auth group).
+- `resources/views/rooms/show.blade.php` — the "Browse together
+  (synced)" toggle, `data-proxy-url`, the iframe (sandbox without
+  `allow-popups`).
+- `public/js/room-sync.js` — pure helpers: proxy URL building,
+  proxied-src detection, sandbox tokens, echo guard, frame-message
+  check. Unit-tested in Node (`node tests/js/room-sync.test.js`).
+- `public/js/room.js` — the parent side: toggle re-mounts the open
+  page, `message` listener (origin + source check, echo guard),
+  `web-scroll` over PeerJS, proxy-error fallback to the direct URL.
 - `tests/Unit/ProxyRewriterTest.php`, `tests/Unit/SsrfGuardTest.php`,
   `tests/Feature/ProxyTest.php` — 30 tests for the proxy.
+- `tests/Feature/RoomSyncTest.php` — 4 tests for the room page side
+  (toggle, proxy URL, sandbox, script order).
