@@ -127,6 +127,44 @@ class ProxyRewriterTest extends TestCase
         $this->assertStringContainsString("type: 'c2t-scroll'", $out);
     }
 
+    public function test_sync_script_watches_get_form_submits(): void
+    {
+        // A search box is a GET form — the injected script must watch
+        // submits and mirror them as a c2t-link (results-page URL),
+        // while leaving the form itself untouched.
+        $html = '<html><head></head><body>'
+            .'<form action="/w/index.php" method="get">'
+            .'<input type="hidden" name="title" value="Special:Search">'
+            .'<input type="search" name="search">'
+            .'</form></body></html>';
+
+        $out = $this->rewriter->rewrite($html, 'https://example.org/');
+
+        $this->assertStringContainsString(
+            '<form action="/w/index.php" method="get">',
+            $out
+        );
+        $this->assertStringContainsString("addEventListener('submit'", $out);
+        // GET-only guard (submitter override included) and the target
+        // URL built from the form's action + serialised fields.
+        $this->assertStringContainsString('formMethod', $out);
+        $this->assertStringContainsString("if (method !== 'get') return;", $out);
+        $this->assertStringContainsString('new FormData(form', $out);
+        $this->assertStringContainsString('url.search = qs;', $out);
+    }
+
+    public function test_sync_script_never_intercepts_post_forms(): void
+    {
+        // The script text must return early for any non-GET method, so
+        // a login or any other POST stays on the phone that submitted it.
+        // Behaviour (a POST submit posts no c2t-link) is proven in the
+        // headless smoke test; here we pin the guard in place.
+        $script = ProxyRewriter::syncScriptTag();
+
+        $this->assertStringContainsString("if (method !== 'get') return;", $script);
+        $this->assertStringContainsString('ev.defaultPrevented', $script);
+    }
+
     public function test_is_blocked_host_matches_subdomains_but_not_lookalikes(): void
     {
         $this->assertTrue(ProxyRewriter::isBlockedHost('doubleclick.net'));

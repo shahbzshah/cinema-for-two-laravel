@@ -10,8 +10,13 @@ fetch of example.org verified). **Phase 2 is built for the Laravel
 room page** (toggle, mount through /proxy, parent `message` listener,
 `web-scroll` over the room's PeerJS link, fallback to the direct URL
 — 66 PHP tests + 17 JS helper tests green, verified in a real
-headless browser against the live proxy). The static app has its own
-Phase 2 (?v=57, same protocol, cross-origin proxy). Until the toggle
+headless browser against the live proxy). **Phase 3 (search mirroring)
+is built too:** a GET form submit inside a proxied page (a search
+box) is mirrored as a `c2t-link` with the results-page URL, so the
+room moves to the same results on both phones — 68 PHP tests + 17 JS
+helper tests green, plus an 18-check headless smoke test against the
+real proxy (real Wikipedia search, synthetic GET + POST forms).
+The static app has its own Phase 2 (?v=57, same protocol, cross-origin proxy). Until the toggle
 is on, `/proxy` works on its own (open it in a browser while signed
 in) but nothing in the room page uses it.
 
@@ -114,6 +119,21 @@ treats it like a newly shared link: it loads the new page through
 `/proxy` on both phones (or shows it on the shared-links shelf).
 The click's default navigation is prevented inside the frame.
 
+The same message is sent for a **GET form submit** (Phase 3 — a
+search box). The injected script watches `submit` in the **bubble**
+phase, so a page whose own script already handles the submit
+(`defaultPrevented`) is left alone, and builds the target URL from
+the form's action (a submit button's `formaction` wins) plus the
+serialised fields — a GET submit replaces any query already on the
+action URL, exactly like a browser navigation. `href` is that
+results-page URL; the parent routes it through the **same** share
+flow as a link tap (server save, shelf, mount, PeerJS `weblink` to
+the partner). A form submit the partner receives never bounces back:
+the partner only mounts the page — mounting posts no `c2t-link`.
+**POST forms are never intercepted** (logins, anything that changes
+state stays on the phone that submitted it), nor are forms with a
+non-`_self` target or `method="dialog"`.
+
 ### Parent → iframe (into the page)
 
 ```js
@@ -132,9 +152,9 @@ after it (they are the echo of the jump, not the user scrolling).
 
 ### What the script deliberately does NOT do
 
-- No GET-form interception (Phase 1 skips it). A search box inside
-  the proxied page submits to the original site and leaves the proxy.
-  Recorded as a known limit below.
+- No live-typing mirroring. Letters appearing in a search box as you
+  type are not sent anywhere — only the submit (the results page) is
+  mirrored. Typing is per-phone until you hit search.
 - No reporting of the initial scroll position on load — the first
   `c2t-scroll` arrives on the first scroll. The room page deliberately
   does NOT send a `c2t-scroll-to` with `{x: 0, y: 0}` on mount: a fresh
@@ -157,6 +177,8 @@ after it (they are the echo of the jump, not the user scrolling).
   to the direct iframe / "Open in browser" path as today.
 - **POST forms leave the proxy.** Only GET navigation is rewritten;
   a form POST goes to the original site and out of the synced view.
+  (Phase 3: a POST submit is deliberately never intercepted — it
+  stays on the phone that submitted it, so logins are never mirrored.)
 - **In-page ads served from the site's own domain stay.** The
   blocklist only covers known ad hosts. A site that serves its own
   ads from its own domain keeps showing them.
@@ -195,3 +217,9 @@ after it (they are the echo of the jump, not the user scrolling).
   `tests/Feature/ProxyTest.php` — 30 tests for the proxy.
 - `tests/Feature/RoomSyncTest.php` — 4 tests for the room page side
   (toggle, proxy URL, sandbox, script order).
+- `tests/js/proxy-search-smoke.mjs` — 18-check headless-Chrome smoke
+  test for Phase 3 (run: `node tests/js/proxy-search-smoke.mjs` —
+  spawns its own artisan serve on :8000, registers a user, creates a
+  room, does a real Wikipedia search through the proxy, checks the
+  partner leg, the no-bounce-back wait, and synthetic GET + POST
+  forms inside the proxied page).

@@ -130,8 +130,12 @@ class ProxyRewriter
      * frame (the Cinema room page, Phase 2) with postMessage:
      *   out: {type:'c2t-scroll', x, y}  — throttled to ~5/s while scrolling
      *   in:  {type:'c2t-scroll-to', x, y} — scrolls this page to match
-     *   out: {type:'c2t-link', href}    — plain left-click on a link
-     * Everything is wrapped in try/catch so a failure never breaks the page.
+     *   out: {type:'c2t-link', href}    — plain left-click on a link,
+     *     or a GET form submit (search box) — the parent treats both as
+     *     "the room moves to this page"
+     * POST forms are never intercepted (logins, anything that changes
+     * state stays on this phone). Everything is wrapped in try/catch so
+     * a failure never breaks the page.
      */
     public static function syncScriptTag(): string
     {
@@ -168,6 +172,39 @@ class ProxyRewriter
         window.parent.postMessage({ type: 'c2t-link', href: href }, '*');
       } catch (e) {}
     }, true);
+    // Search boxes: a GET form submit is a navigation to a results page
+    // (action + ?query), so it is mirrored the same way as a link tap —
+    // the parent opens the same results page on both phones.
+    // Bubble phase, on purpose: if the page's own script already
+    // handles the submit (live search that updates the page itself),
+    // defaultPrevented is set and we leave it alone.
+    document.addEventListener('submit', function (ev) {
+      try {
+        if (ev.defaultPrevented) return;
+        var form = ev.target;
+        if (!form || form.tagName !== 'FORM') return;
+        var submitter = ev.submitter || null;
+        var method = ((submitter && submitter.formMethod) || form.method || 'get').toLowerCase();
+        // Only GET is mirrored. POST (logins, anything that changes
+        // state) is never intercepted — it stays on this phone.
+        if (method !== 'get') return;
+        var target = (submitter && submitter.formTarget) || form.target || '';
+        if (target && target !== '_self') return;
+        var action = (submitter && submitter.formAction) || form.action || window.location.href;
+        var url;
+        try { url = new URL(action, window.location.href); } catch (e) { return; }
+        var qs = '';
+        try {
+          var fd = null;
+          try { fd = new FormData(form, submitter); } catch (e2) { fd = new FormData(form); }
+          qs = new URLSearchParams(fd).toString();
+        } catch (e) {}
+        // A GET submit replaces any query already on the action URL.
+        url.search = qs;
+        ev.preventDefault();
+        window.parent.postMessage({ type: 'c2t-link', href: url.toString() }, '*');
+      } catch (e) {}
+    });
   } catch (e) {}
 })();
 </script>
