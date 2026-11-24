@@ -8,7 +8,13 @@
          data-user-name="{{ auth()->user()->name }}"
          data-proxy-url="{{ route('proxy', [], false) }}"
          data-weblinks-url="{{ route('rooms.weblinks.index', ['code' => $room->code]) }}"
-         data-weblink-store-url="{{ route('rooms.weblinks.store', ['code' => $room->code]) }}">
+         data-weblink-store-url="{{ route('rooms.weblinks.store', ['code' => $room->code]) }}"
+         data-media-url="{{ route('rooms.media.index', ['code' => $room->code]) }}"
+         data-media-store-url="{{ route('rooms.media.store', ['code' => $room->code]) }}"
+         data-current-media-type="{{ $currentMedia?->type }}"
+         data-current-media-url="{{ $currentMedia?->url }}"
+         data-current-media-title="{{ $currentMedia?->title }}"
+         data-current-media-id="{{ $currentMedia?->id }}">
 
         <div class="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -20,6 +26,53 @@
                 <span id="syncPillText">Connecting…</span>
             </span>
         </div>
+
+        {{-- Watch together — synced video player --}}
+        <section class="mt-6">
+            <h2 class="font-label-sm text-label-sm text-text-muted uppercase tracking-wider">Watch together</h2>
+            <p class="text-[11px] text-text-muted mt-2 leading-relaxed">
+                Paste a YouTube link or a direct video link, or pick a file from your device — both phones
+                watch the same video, and play, pause and seeking stay in sync. YouTube plays ad-free
+                when it can, and falls back to the plain YouTube player when it cannot.
+            </p>
+
+            <form id="mediaForm" class="mt-3 flex gap-2">
+                <input id="mediaInput" name="url" type="text" placeholder="Paste a YouTube or video link…"
+                    value="{{ $currentMedia && $currentMedia->type !== 'local' ? ($currentMedia->type === 'youtube' ? 'https://www.youtube.com/watch?v=' . $currentMedia->url : $currentMedia->url) : '' }}"
+                    class="flex-1 min-w-0 h-10 px-3.5 rounded-[6px] bg-canvas-background border border-hairline-border text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-primary-container/60 transition">
+                <button type="submit" class="h-10 px-4 rounded-[6px] bg-primary-container hover:bg-primary text-canvas-background font-semibold text-sm transition cursor-pointer shrink-0">Share video</button>
+                <label for="localFileInput" class="h-10 px-4 rounded-[6px] bg-surface-control hover:bg-surface-variant border border-hairline-border text-text-primary font-semibold text-sm transition cursor-pointer shrink-0 flex items-center">Choose file</label>
+                <input id="localFileInput" type="file" accept="video/*" class="hidden">
+            </form>
+
+            <div id="videoStage" class="mt-3 w-full aspect-video bg-black rounded-[10px] border border-hairline-border overflow-hidden relative">
+                <div id="videoEmpty" class="absolute inset-0 flex flex-col items-center justify-center text-center p-6 {{ $currentMedia ? 'hidden' : '' }}">
+                    <p class="font-headline-md text-headline-md italic text-text-primary">No video yet</p>
+                    <p class="text-text-secondary text-sm max-w-md mt-1.5">Paste a link above, or pick a file from your device.</p>
+                </div>
+                <video id="roomVideo" class="hidden absolute inset-0 w-full h-full bg-black" playsinline preload="metadata"></video>
+                <div id="ytMountWrap" class="hidden absolute inset-0 w-full h-full bg-black">
+                    <div id="ytMount" class="w-full h-full"></div>
+                </div>
+                <div id="movieWaiting" class="hidden absolute inset-0 flex flex-col items-center justify-center text-center p-6 bg-black">
+                    <p class="font-headline-md text-headline-md italic text-text-primary">Waiting for the shared file…</p>
+                    <p id="movieWaitingText" class="text-text-secondary text-sm max-w-md mt-1.5">Your partner is sharing a video from their device — it will start here when the stream arrives.</p>
+                </div>
+                <button id="unmuteBtn" type="button" class="hidden absolute top-3 right-3 px-3 py-1.5 rounded-[6px] bg-primary-container text-canvas-background text-xs font-semibold cursor-pointer">Tap to unmute</button>
+            </div>
+
+            <div class="mt-3 flex items-center gap-3">
+                <button id="playPauseBtn" type="button" class="h-10 px-4 rounded-[6px] bg-primary-container hover:bg-primary text-canvas-background font-semibold text-sm transition cursor-pointer shrink-0">Play</button>
+                <input id="seekSlider" type="range" min="0" max="0" step="0.1" value="0" class="flex-1 min-w-0 accent-primary-container cursor-pointer">
+                <span class="font-code-timecode text-[11px] text-text-secondary shrink-0"><span id="currentTimeLabel">0:00</span> / <span id="durationLabel">0:00</span></span>
+            </div>
+            <p id="nowPlayingTitle" class="text-sm text-text-secondary mt-2 truncate">{{ $currentMedia?->title ?? ($currentMedia ? 'Shared video' : '') }}</p>
+
+            <div id="mediaErrorBanner" class="hidden mt-3 rounded-[6px] border border-error/40 bg-error-container/30 px-4 py-3 text-sm flex items-center justify-between gap-3">
+                <span id="mediaErrorText" class="text-text-primary"></span>
+                <button id="mediaErrorDismissBtn" type="button" class="text-error font-bold px-1.5 cursor-pointer shrink-0">✕</button>
+            </div>
+        </section>
 
         {{-- Shared mini-browser --}}
         <section class="mt-6">
@@ -98,8 +151,9 @@
         <section class="mt-8 bg-surface-card border border-hairline-border rounded-[10px] px-4 py-4">
             <h2 class="font-label-sm text-label-sm text-text-muted uppercase tracking-wider">Live video &amp; voice</h2>
             <p class="text-text-secondary text-sm mt-2 leading-relaxed">
-                Video calling arrives in the next version — the room shell above already connects you peer-to-peer
-                (the amber “Live Synced” pill) so shared links travel instantly. Until then, this room is the shared browser.
+                Watching together is live above — pick a video and it plays in sync on both phones.
+                Video calling arrives in a later version; the room shell already connects you
+                peer-to-peer (the amber “Live Synced” pill) so shared links and playback travel instantly.
             </p>
         </section>
 
@@ -113,5 +167,6 @@
 
 @push('scripts')
     <script src="{{ asset('js/room-sync.js') }}"></script>
+    <script src="{{ asset('js/room-player.js') }}"></script>
     <script src="{{ asset('js/room.js') }}"></script>
 @endpush

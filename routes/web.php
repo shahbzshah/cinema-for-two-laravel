@@ -3,6 +3,7 @@
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ProxyController;
 use App\Http\Controllers\RoomController;
+use App\Http\Controllers\RoomMediaController;
 use App\Http\Controllers\WeblinkController;
 use Illuminate\Support\Facades\Route;
 
@@ -33,5 +34,9 @@ Route::middleware('auth')->group(function () {
         ->where('code', '[A-Za-z0-9]{6}')->name('rooms.weblinks.index');
     Route::post('/rooms/{code}/weblinks', [WeblinkController::class, 'store'])
         ->where('code', '[A-Za-z0-9]{6}')->name('rooms.weblinks.store');
+    Route::get('/rooms/{code}/media', [RoomMediaController::class, 'index'])
+        ->where('code', '[A-Za-z0-9]{6}')->name('rooms.media.index');
+    Route::post('/rooms/{code}/media', [RoomMediaController::class, 'store'])
+        ->where('code', '[A-Za-z0-9]{6}')->name('rooms.media.store');
     Route::get('/proxy', [ProxyController::class, 'show'])->name('proxy');
 });

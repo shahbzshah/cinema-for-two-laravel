@@ -23,6 +23,16 @@ class Room extends Model
         return $this->hasMany(Weblink::class)->orderByDesc('created_at');
     }
 
+    public function media(): HasMany
+    {
+        return $this->hasMany(RoomMedia::class)->orderByDesc('created_at');
+    }
+
+    public function latestMedia(): ?RoomMedia
+    {
+        return $this->media()->first();
+    }
+
     public function latestWeblink(): ?Weblink
     {
         return $this->weblinks()->first();

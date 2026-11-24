@@ -346,6 +346,812 @@
         }
     }
 
+    // --- Synced video player -------------------------------------------
+    // Ported from the static app (app.js, ?v=33/?v=43/?v=49). Pure
+    // decisions live in public/js/room-player.js (window.CinemaPlayer);
+    // this block owns the DOM: the <video> element, the YouTube embed,
+    // the transport bar, and the PeerJS messages. The mini-browser above
+    // is untouched — theater and browser are separate sections.
+    var playerLib = (typeof window !== 'undefined' && window.CinemaPlayer) || null;
+
+    var videoEl = document.getElementById('roomVideo');
+    var ytWrap = document.getElementById('ytMountWrap');
+    var videoEmpty = document.getElementById('videoEmpty');
+    var movieWaiting = document.getElementById('movieWaiting');
+    var movieWaitingText = document.getElementById('movieWaitingText');
+    var mediaErrorBanner = document.getElementById('mediaErrorBanner');
+    var mediaErrorText = document.getElementById('mediaErrorText');
+    var unmuteBtn = document.getElementById('unmuteBtn');
+    var playPauseBtn = document.getElementById('playPauseBtn');
+    var seekSlider = document.getElementById('seekSlider');
+    var currentTimeLabel = document.getElementById('currentTimeLabel');
+    var durationLabel = document.getElementById('durationLabel');
+    var nowPlayingTitle = document.getElementById('nowPlayingTitle');
+    var mediaForm = document.getElementById('mediaForm');
+    var mediaInput = document.getElementById('mediaInput');
+    var localFileInput = document.getElementById('localFileInput');
+
+    var mediaStoreUrl = root.dataset.mediaStoreUrl;
+    var myPeerId = null;
+    var isHost = false;
+    var connPeerId = null;
+    var partnerMedia = null;
+
+    // Player state. mediaType: 'none' | 'youtube' | 'url' | 'local' |
+    // 'movie' (receiving a shared file). mediaUrl is the video id for
+    // youtube, the link for url, the file name for local. ytVideoId
+    // remembers the YouTube id behind a Piped stream so a dead stream can
+    // fall back to the embed. mySeq numbers our own playback messages —
+    // seq is per-device, never compared with the partner's counter.
+    var playerState = {
+        mediaType: 'none',
+        mediaUrl: '',
+        mediaTitle: '',
+        mediaId: null,
+        ytVideoId: null,
+        viaPiped: false,
+        mySeq: 0,
+        lastSeqBySender: {},
+        lastRemotePauseAt: 0,
+        lastRemoteApplied: null,
+        userPlayIntent: false,
+        remoteSyncUntil: 0,
+        ytApiReady: false,
+        ytApiLoading: false,
+        pendingYtVideoId: null,
+        ytPlayer: null,
+        localFileUrl: null,
+        localFileName: null,
+        movieSharing: false,
+        movieCall: null,
+        receivingMovie: false,
+        movieRemoteTime: null,
+        errorRetried: false,
+        scrubbing: false,
+    };
+    roomDebug.player = playerState;
+    roomDebug.lastPlayback = null;
+    roomDebug.lastBroadcast = null;
+    roomDebug.lastMedia = null;
+    roomDebug.lastMovieControl = null;
+
+    function formatTime(seconds) {
+        var s = Math.max(0, Math.floor(Number(seconds) || 0));
+        return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }
+
+    function showMediaError(message) {
+        if (!message) return;
+        mediaErrorText.textContent = message;
+        mediaErrorBanner.classList.remove('hidden');
+    }
+
+    function hideMediaError() {
+        mediaErrorBanner.classList.add('hidden');
+    }
+
+    if (document.getElementById('mediaErrorDismissBtn')) {
+        document.getElementById('mediaErrorDismissBtn').addEventListener('click', hideMediaError);
+    }
+
+    function showUnmute() { unmuteBtn.classList.remove('hidden'); }
+    function hideUnmute() { unmuteBtn.classList.add('hidden'); }
+    unmuteBtn.addEventListener('click', function () {
+        videoEl.muted = false;
+        hideUnmute();
+    });
+
+    // --- Player clock (shared by both engines) -------------------------
+    function getPlayerCurrentTime() {
+        if (playerState.receivingMovie && playerLib) {
+            return playerLib.movieRemoteCurrentTime(playerState.movieRemoteTime, Date.now());
+        }
+        if (playerState.mediaType === 'youtube' && playerState.ytPlayer && typeof playerState.ytPlayer.getCurrentTime === 'function') {
+            return playerState.ytPlayer.getCurrentTime() || 0;
+        }
+        if (videoEl) return videoEl.currentTime || 0;
+        return 0;
+    }
+
+    function getPlayerDuration() {
+        if (playerState.receivingMovie) return (playerState.movieRemoteTime && playerState.movieRemoteTime.duration) || 0;
+        if (playerState.mediaType === 'youtube' && playerState.ytPlayer && typeof playerState.ytPlayer.getDuration === 'function') {
+            return playerState.ytPlayer.getDuration() || 0;
+        }
+        if (videoEl) return videoEl.duration || 0;
+        return 0;
+    }
+
+    function isPlayerCurrentlyPlaying() {
+        if (playerState.receivingMovie) return !!(playerState.movieRemoteTime && playerState.movieRemoteTime.isPlaying);
+        if (playerState.mediaType === 'youtube' && playerState.ytPlayer && typeof playerState.ytPlayer.getPlayerState === 'function' && window.YT) {
+            return playerState.ytPlayer.getPlayerState() === window.YT.PlayerState.PLAYING;
+        }
+        if (videoEl) return !videoEl.paused && !videoEl.ended;
+        return false;
+    }
+
+    function isRemoteSyncLocked() {
+        return Date.now() < playerState.remoteSyncUntil;
+    }
+
+    function engageRemoteSyncLock() {
+        playerState.remoteSyncUntil = Date.now() + (playerLib ? playerLib.REMOTE_SYNC_LOCK_MS : 750);
+    }
+
+    function executeLocalPlay() {
+        if (playerState.mediaType === 'youtube' && playerState.ytPlayer && typeof playerState.ytPlayer.playVideo === 'function') {
+            playerState.ytPlayer.playVideo();
+        } else if (videoEl) {
+            videoEl.play().catch(function (err) {
+                // The browser blocked autoplay with sound — play muted
+                // instead and offer one tap to unmute, instead of a
+                // frozen screen.
+                if (err && err.name === 'NotAllowedError') {
+                    videoEl.muted = true;
+                    videoEl.play().catch(function () {});
+                    showUnmute();
+                    showToast('Video started muted — tap Tap to unmute for sound.');
+                } else {
+                    showToast('Tap Play once to allow browser audio playback.');
+                }
+            });
+        }
+        updatePlayButtonUI(true);
+    }
+
+    function executeLocalPause() {
+        if (playerState.mediaType === 'youtube' && playerState.ytPlayer && typeof playerState.ytPlayer.pauseVideo === 'function') {
+            playerState.ytPlayer.pauseVideo();
+        } else if (videoEl) {
+            videoEl.pause();
+        }
+        updatePlayButtonUI(false);
+    }
+
+    function executeLocalSeek(seconds) {
+        var clamped = Math.max(0, Number(seconds) || 0);
+        if (playerState.mediaType === 'youtube' && playerState.ytPlayer && typeof playerState.ytPlayer.seekTo === 'function') {
+            playerState.ytPlayer.seekTo(clamped, true);
+        } else if (videoEl) {
+            if (Number.isFinite(videoEl.duration)) {
+                videoEl.currentTime = Math.min(clamped, videoEl.duration);
+            } else {
+                videoEl.currentTime = clamped;
+            }
+        }
+        updateTimelineUI();
+    }
+
+    function updatePlayButtonUI(playing) {
+        playPauseBtn.textContent = playing ? 'Pause' : 'Play';
+    }
+
+    function updateTimelineUI() {
+        var cur = getPlayerCurrentTime();
+        var dur = getPlayerDuration();
+        currentTimeLabel.textContent = formatTime(cur);
+        durationLabel.textContent = formatTime(dur);
+        if (dur > 0) {
+            seekSlider.max = dur;
+            if (!playerState.scrubbing) seekSlider.value = cur;
+            var pct = Math.min(100, (cur / dur) * 100);
+            seekSlider.style.background = 'linear-gradient(to right, #E5A93C ' + pct + '%, rgba(255,255,255,0.16) ' + pct + '%)';
+        }
+    }
+
+    // --- Broadcasting playback (with the ?v=49 echo guards) ------------
+    function broadcastPlaybackChange(isPlaying, currentTime, actionLabel) {
+        if (!playerLib) return;
+        if (playerState.mediaType === 'none') return;
+        // A movie receiver's clock is the sender's — its own play event
+        // is the stream starting, never a state change to send back.
+        if (playerState.receivingMovie) return;
+        var decision = playerLib.shouldBroadcastPlayback({
+            isPlaying: isPlaying,
+            actionLabel: actionLabel || null,
+            userPlayIntent: playerState.userPlayIntent,
+            lastRemotePauseAt: playerState.lastRemotePauseAt,
+            lastRemoteApplied: playerState.lastRemoteApplied,
+            currentTime: currentTime,
+            nowMs: Date.now(),
+        });
+        if (!decision.send) return;
+        if (decision.consumeIntent) playerState.userPlayIntent = false;
+        // A real state flip by us clears the echo guard, so a play
+        // pressed after our own pause is never swallowed.
+        if (playerState.lastRemoteApplied && isPlaying !== playerState.lastRemoteApplied.isPlaying) {
+            playerState.lastRemoteApplied = null;
+        }
+        playerState.mySeq += 1;
+        var msg = {
+            kind: 'playback',
+            isPlaying: Boolean(isPlaying),
+            currentTime: Number(currentTime) || 0,
+            duration: getPlayerDuration(),
+            actionLabel: actionLabel || (isPlaying ? 'played' : 'paused'),
+            seq: playerState.mySeq,
+            by: userName,
+            byPeer: myPeerId,
+            updatedBy: myPeerId,
+            at: Date.now(),
+        };
+        roomDebug.lastBroadcast = msg;
+        sendPeer(msg);
+    }
+
+    // "Still playing" every 10s while playing — a late joiner, or a side
+    // whose player drifted, re-syncs from it. A heartbeat never starts
+    // playback and never moves the playhead (the receiver enforces both).
+    setInterval(function () {
+        if (playerState.mediaType === 'none' || playerState.receivingMovie) return;
+        if (!isPlayerCurrentlyPlaying()) return;
+        broadcastPlaybackChange(true, getPlayerCurrentTime(), 'heartbeat');
+    }, playerLib ? playerLib.PLAYBACK_HEARTBEAT_MS : 10000);
+
+    // --- Applying the partner's playback --------------------------------
+    function applyRemotePlayback(playback) {
+        if (!playerLib) return;
+        var decision = playerLib.shouldApplyPlayback(playback, {
+            myId: myPeerId,
+            lastSeqBySender: playerState.lastSeqBySender,
+            isPlayingNow: isPlayerCurrentlyPlaying(),
+            nowMs: Date.now(),
+        });
+        if (!decision.apply) return;
+        if (playback.seq) {
+            playerState.lastSeqBySender[playback.updatedBy || playback.byPeer || 'partner'] = playback.seq;
+        }
+        roomDebug.lastPlayback = playback;
+        engageRemoteSyncLock();
+        var targetTime = decision.targetTime;
+        if (playback.updatedBy || playback.byPeer) {
+            playerState.lastRemoteApplied = { isPlaying: playback.isPlaying, currentTime: targetTime, at: Date.now() };
+            if (!playback.isPlaying) playerState.lastRemotePauseAt = Date.now();
+        }
+        // Receiving a shared movie: our player is a live stream with no
+        // seekable timeline — never touch the element (pausing it would
+        // freeze our view while the sender keeps playing). Just mirror
+        // the sender's clock for the time display.
+        if (playerState.receivingMovie) {
+            playerState.movieRemoteTime = {
+                currentTime: targetTime,
+                duration: (playback.duration && Number.isFinite(playback.duration)) ? playback.duration : ((playerState.movieRemoteTime && playerState.movieRemoteTime.duration) || 0),
+                isPlaying: playback.isPlaying,
+                at: Date.now(),
+            };
+            updatePlayButtonUI(playback.isPlaying);
+            updateTimelineUI();
+            if (playback.by && playback.actionLabel !== 'heartbeat') {
+                showToast(playback.by + ' ' + (playback.actionLabel || (playback.isPlaying ? 'played' : 'paused')) + ' at ' + formatTime(targetTime) + '.');
+            }
+            return;
+        }
+        // Anti-stutter: heartbeats never move the playhead — their
+        // timestamp comes from the partner's clock, so every heartbeat
+        // would yank the video and make it freeze and re-buffer.
+        var isHeartbeat = playback.actionLabel === 'heartbeat';
+        var drift = Math.abs(getPlayerCurrentTime() - targetTime);
+        if (drift > playerLib.SEEK_DRIFT_S && !isHeartbeat) {
+            executeLocalSeek(targetTime);
+        }
+        if (playback.isPlaying) {
+            executeLocalPlay();
+        } else {
+            executeLocalPause();
+        }
+        if (playback.by && playback.actionLabel !== 'heartbeat') {
+            showToast(playback.by + ' ' + (playback.actionLabel || (playback.isPlaying ? 'played' : 'paused')) + ' at ' + formatTime(targetTime) + '.');
+        }
+    }
+
+    // --- Mounting --------------------------------------------------------
+    function showStage(which) {
+        videoEmpty.classList.add('hidden');
+        movieWaiting.classList.add('hidden');
+        if (which === 'video') {
+            videoEl.classList.remove('hidden');
+            ytWrap.classList.add('hidden');
+        } else if (which === 'youtube') {
+            videoEl.classList.add('hidden');
+            ytWrap.classList.remove('hidden');
+        } else {
+            videoEl.classList.add('hidden');
+            ytWrap.classList.add('hidden');
+        }
+    }
+
+    function stopYtPlayer() {
+        if (playerState.ytPlayer && typeof playerState.ytPlayer.stopVideo === 'function') {
+            try { playerState.ytPlayer.stopVideo(); } catch (e) {}
+        }
+    }
+
+    function mountDirectVideo(src) {
+        stopYtPlayer();
+        hideMediaError();
+        hideUnmute();
+        showStage('video');
+        playerState.errorRetried = false;
+        if (videoEl.getAttribute('src') !== src) {
+            videoEl.srcObject = null;
+            videoEl.setAttribute('src', src);
+            videoEl.load();
+        }
+    }
+
+    function fetchJsonWithTimeout(url, timeoutMs) {
+        var controller = new AbortController();
+        var timer = setTimeout(function () { controller.abort(); }, timeoutMs);
+        return fetch(url, { signal: controller.signal })
+            .then(function (res) { if (!res.ok) return null; return res.json(); })
+            .catch(function () { return null; })
+            .finally(function () { clearTimeout(timer); });
+    }
+
+    async function resolveYouTubeViaPiped(videoId) {
+        for (var i = 0; i < playerLib.PIPED_API_BASES.length; i++) {
+            var data = await fetchJsonWithTimeout(playerLib.PIPED_API_BASES[i] + '/streams/' + videoId, playerLib.PIPED_FETCH_TIMEOUT_MS);
+            if (data) {
+                var picked = playerLib.pickPipedStream(data);
+                if (picked) return picked;
+            }
+        }
+        return null;
+    }
+
+    function waitForPlayable(videoEl, timeoutMs) {
+        if (videoEl.readyState >= 3) return Promise.resolve(true);
+        return new Promise(function (resolve) {
+            var done = false;
+            var timer = setTimeout(function () { finish(false); }, timeoutMs);
+            function finish(ok) {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                videoEl.removeEventListener('canplay', onCanPlay);
+                videoEl.removeEventListener('error', onError);
+                resolve(ok);
+            }
+            function onCanPlay() { finish(true); }
+            function onError() { finish(false); }
+            videoEl.addEventListener('canplay', onCanPlay, { once: true });
+            videoEl.addEventListener('error', onError, { once: true });
+        });
+    }
+
+    // YouTube via the Piped redirect (ad-free direct stream, MP4
+    // preferred). Any failure falls back to the YouTube embed — never a
+    // dead screen. A stream that dies mid-play falls back the same way.
+    async function mountYouTubeAdFree(videoId, titleLabel) {
+        nowPlayingTitle.textContent = 'Finding an ad-free stream…';
+        try {
+            var piped = await resolveYouTubeViaPiped(videoId);
+            if (piped) {
+                var title = piped.title || titleLabel || ('YouTube (' + videoId + ')');
+                playerState.ytVideoId = videoId;
+                playerState.viaPiped = true;
+                playerState.mediaType = 'url';
+                playerState.mediaUrl = piped.streamUrl;
+                playerState.mediaTitle = title;
+                nowPlayingTitle.textContent = title;
+                mountDirectVideo(piped.streamUrl);
+                var playable = await waitForPlayable(videoEl, 10000);
+                if (playable) return true;
+            }
+        } catch (e) { /* fall through to the embed */ }
+        mountYouTubePlayer(videoId, titleLabel);
+        return false;
+    }
+
+    function loadYouTubeApi() {
+        if (playerState.ytApiReady || playerState.ytApiLoading) return;
+        if (typeof window !== 'undefined' && window.YT && window.YT.Player) {
+            playerState.ytApiReady = true;
+            return;
+        }
+        playerState.ytApiLoading = true;
+        var tag = document.createElement('script');
+        tag.src = 'https://www.youtube.com/iframe_api';
+        var firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+    }
+
+    if (typeof window !== 'undefined') {
+        window.onYouTubeIframeAPIReady = function () {
+            playerState.ytApiReady = true;
+            playerState.ytApiLoading = false;
+            if (playerState.pendingYtVideoId) {
+                var id = playerState.pendingYtVideoId;
+                playerState.pendingYtVideoId = null;
+                mountYouTubePlayer(id);
+            }
+        };
+    }
+
+    function mountYouTubePlayer(videoId, titleLabel) {
+        stopYtPlayer();
+        videoEl.pause();
+        hideMediaError();
+        if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId || '')) {
+            showMediaError('That YouTube link did not play — check the full link and try again.');
+            showToast('That YouTube link did not play — check the full link and try again.');
+            return;
+        }
+        playerState.ytVideoId = videoId;
+        playerState.viaPiped = false;
+        playerState.mediaType = 'youtube';
+        playerState.mediaUrl = videoId;
+        playerState.mediaTitle = titleLabel || ('YouTube (' + videoId + ')');
+        nowPlayingTitle.textContent = 'Loading YouTube video...';
+        showStage('youtube');
+        if (!playerState.ytApiReady) {
+            playerState.pendingYtVideoId = videoId;
+            loadYouTubeApi();
+            return;
+        }
+        if (playerState.ytPlayer && typeof playerState.ytPlayer.loadVideoById === 'function') {
+            playerState.ytPlayer.loadVideoById(videoId);
+            return;
+        }
+        playerState.ytPlayer = new window.YT.Player('ytMount', {
+            videoId: videoId,
+            width: '100%',
+            height: '100%',
+            playerVars: { autoplay: 0, controls: 0, modestbranding: 1, rel: 0, playsinline: 1 },
+            events: {
+                onReady: function (event) {
+                    var data = event.target.getVideoData && event.target.getVideoData();
+                    if (data && data.title) {
+                        playerState.mediaTitle = data.title;
+                        nowPlayingTitle.textContent = data.title;
+                    }
+                },
+                onError: function (event) {
+                    var code = event && event.data;
+                    var why = (code === 101 || code === 150)
+                        ? 'the owner turned off embedding'
+                        : (code === 100)
+                            ? 'it may be private or deleted'
+                            : 'check the link and try another video';
+                    showMediaError('This YouTube video can\'t play here — ' + why + '.');
+                    showToast('This YouTube video can\'t play here — ' + why + '.');
+                },
+                onStateChange: function (event) {
+                    if (isRemoteSyncLocked()) return;
+                    if (event.data === window.YT.PlayerState.PLAYING) {
+                        // Echo of the partner's pause: YouTube can resume
+                        // on its own after buffering even though pause was
+                        // called — re-pause instead of broadcasting a
+                        // 'played' that re-plays the partner. A deliberate
+                        // press sets userPlayIntent first.
+                        if (!playerState.userPlayIntent && playerState.lastRemotePauseAt && Date.now() - playerState.lastRemotePauseAt < playerLib.PAUSE_ECHO_MS) {
+                            if (playerState.ytPlayer && typeof playerState.ytPlayer.pauseVideo === 'function') playerState.ytPlayer.pauseVideo();
+                            updatePlayButtonUI(false);
+                            return;
+                        }
+                        var data = event.target.getVideoData && event.target.getVideoData();
+                        if (data && data.title) {
+                            playerState.mediaTitle = data.title;
+                            nowPlayingTitle.textContent = data.title;
+                        }
+                        updatePlayButtonUI(true);
+                        broadcastPlaybackChange(true, getPlayerCurrentTime());
+                    } else if (event.data === window.YT.PlayerState.PAUSED) {
+                        updatePlayButtonUI(false);
+                        broadcastPlaybackChange(false, getPlayerCurrentTime());
+                    }
+                },
+            },
+        });
+    }
+
+    // One mount path for every media record — local picks, partner picks,
+    // and the room's saved video on load.
+    function mountMedia(media) {
+        if (!media || !media.type || !media.url) return;
+        if (playerState.movieSharing) stopMovieShare(false);
+        if (playerState.receivingMovie) stopReceivingMovie(false);
+        playerState.mediaId = media.id || null;
+        playerState.mediaTitle = media.title || '';
+        roomDebug.lastMedia = media;
+        if (media.type === 'youtube') {
+            mountYouTubeAdFree(media.url, media.title);
+        } else if (media.type === 'url') {
+            playerState.ytVideoId = null;
+            playerState.viaPiped = false;
+            playerState.mediaType = 'url';
+            playerState.mediaUrl = media.url;
+            playerState.mediaTitle = media.title || media.url;
+            nowPlayingTitle.textContent = playerState.mediaTitle;
+            mountDirectVideo(media.url);
+        } else if (media.type === 'local') {
+            // Our own file is already in the <video> element (the file
+            // picker mounts it before sharing). A partner's file has no
+            // picture here yet — the shared stream arrives next.
+            if (playerState.mediaType === 'local' && playerState.localFileName === media.url) return;
+            playerState.mediaType = 'movie';
+            playerState.mediaUrl = media.url;
+            playerState.mediaTitle = media.title || media.url;
+            nowPlayingTitle.textContent = playerState.mediaTitle;
+            videoEl.classList.add('hidden');
+            ytWrap.classList.add('hidden');
+            videoEmpty.classList.add('hidden');
+            movieWaiting.classList.remove('hidden');
+            movieWaitingText.textContent = (media.title || media.url) + ' — your partner is sharing it from their device. It will start here when the stream arrives.';
+        }
+    }
+
+    // --- Sharing a video (same shape as shareLink) ----------------------
+    function shareMedia(type, url, title) {
+        return fetch(mediaStoreUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'X-CSRF-TOKEN': csrf,
+            },
+            body: JSON.stringify({ type: type, url: url, title: title || null }),
+        })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+            .then(function (res) {
+                if (!res.ok) throw new Error((res.body && res.body.message) || 'Could not share that video.');
+                var media = res.body;
+                partnerMedia = null;
+                mountMedia(media);
+                sendPeer({ kind: 'media', id: media.id, type: media.type, url: media.url, title: media.title, by: userName, byPeer: myPeerId, at: Date.now() });
+                return media;
+            })
+            .catch(function (err) { showToast(err.message || 'Could not share that video.'); return null; });
+    }
+
+    mediaForm.addEventListener('submit', function (e) {
+        e.preventDefault();
+        if (!playerLib) { showToast('The video player did not load — refresh the page.'); return; }
+        var plan = playerLib.parseVideoInput(mediaInput.value);
+        if (plan.via === 'none') {
+            if (plan.reason === 'unsupported-format') {
+                showToast('That format needs a converter first — pick an MP4 or WebM file, or a YouTube link.');
+            } else {
+                showToast('That does not look like a video — paste a YouTube link or a direct video link.');
+            }
+            return;
+        }
+        if (plan.via === 'piped') {
+            shareMedia('youtube', plan.videoId, null);
+        } else {
+            shareMedia('url', plan.url, null);
+        }
+    });
+
+    localFileInput.addEventListener('change', function () {
+        var file = localFileInput.files && localFileInput.files[0];
+        if (!file) return;
+        var ext = playerLib ? playerLib.detectVideoExtension(file.name) : '';
+        if (ext === 'm3u8') {
+            showMediaError(playerLib.mediaErrorMessage('hls-local', true));
+            return;
+        }
+        if (playerState.localFileUrl) {
+            try { URL.revokeObjectURL(playerState.localFileUrl); } catch (e) {}
+        }
+        playerState.localFileUrl = URL.createObjectURL(file);
+        playerState.localFileName = file.name;
+        playerState.ytVideoId = null;
+        playerState.viaPiped = false;
+        playerState.mediaType = 'local';
+        playerState.mediaUrl = file.name;
+        playerState.mediaTitle = file.name;
+        nowPlayingTitle.textContent = file.name;
+        hideMediaError();
+        mountDirectVideo(playerState.localFileUrl);
+        shareMedia('local', file.name, file.name).then(function (media) {
+            if (media) startMovieShare();
+        });
+    });
+
+    // --- Transport bar ----------------------------------------------------
+    playPauseBtn.addEventListener('click', function () {
+        if (playerState.mediaType === 'none') { showToast('No video yet — paste a link or pick a file first.'); return; }
+        if (playerState.receivingMovie) {
+            var action = isPlayerCurrentlyPlaying() ? 'pause' : 'play';
+            sendMovieControl(action, getPlayerCurrentTime());
+            return;
+        }
+        playerState.userPlayIntent = true;
+        if (isPlayerCurrentlyPlaying()) {
+            executeLocalPause();
+        } else {
+            executeLocalPlay();
+        }
+    });
+
+    seekSlider.addEventListener('input', function () {
+        playerState.scrubbing = true;
+        currentTimeLabel.textContent = formatTime(Number(seekSlider.value) || 0);
+    });
+
+    seekSlider.addEventListener('change', function () {
+        playerState.scrubbing = false;
+        var target = Number(seekSlider.value) || 0;
+        if (playerState.receivingMovie) {
+            sendMovieControl('seek', target);
+            return;
+        }
+        executeLocalSeek(target);
+        broadcastPlaybackChange(isPlayerCurrentlyPlaying(), target, 'seeked');
+    });
+
+    // --- HTML5 video events (play / pause come from the element too) -----
+    videoEl.addEventListener('play', function () {
+        if (isRemoteSyncLocked()) return;
+        // Echo of the partner's pause — re-pause instead of broadcasting
+        // a 'played' that re-plays the partner. A movie receiver's own
+        // play is the stream starting, never an echo.
+        if (!playerState.userPlayIntent && !playerState.receivingMovie && playerLib && playerState.lastRemotePauseAt && Date.now() - playerState.lastRemotePauseAt < playerLib.PAUSE_ECHO_MS) {
+            videoEl.pause();
+            updatePlayButtonUI(false);
+            return;
+        }
+        updatePlayButtonUI(true);
+        if (!playerState.receivingMovie) broadcastPlaybackChange(true, getPlayerCurrentTime());
+    });
+
+    videoEl.addEventListener('pause', function () {
+        if (isRemoteSyncLocked()) return;
+        updatePlayButtonUI(false);
+        if (!playerState.receivingMovie) broadcastPlaybackChange(false, getPlayerCurrentTime());
+    });
+
+    videoEl.addEventListener('timeupdate', function () {
+        updateTimelineUI();
+    });
+
+    videoEl.addEventListener('loadedmetadata', function () {
+        updateTimelineUI();
+        // Black screen with sound (HEVC/DivX video, audio plays, the
+        // element fires no error): say so plainly instead of silence.
+        setTimeout(function () {
+            if (!playerLib || playerState.mediaType === 'movie') return;
+            var ext = playerLib.detectVideoExtension(playerState.mediaType === 'local' ? (playerState.localFileName || '') : (playerState.mediaUrl || ''));
+            if (playerLib.videoPictureMissing(videoEl.videoWidth, videoEl.videoHeight, videoEl.duration, ext)) {
+                showMediaError(playerLib.mediaErrorMessage('novideo', playerState.mediaType === 'local'));
+            }
+        }, 2500);
+    });
+
+    videoEl.addEventListener('error', function () {
+        if (!playerLib) return;
+        var code = videoEl.error ? videoEl.error.code : 0;
+        var action = playerLib.videoErrorRecovery(playerState.ytVideoId, code, playerState.errorRetried);
+        if (action === 'embed' && playerState.ytVideoId) {
+            // The Piped stream died — the YouTube id is known, so fall
+            // back to the embed instead of a dead screen.
+            showToast('Ad-free stream stopped — switched to YouTube.');
+            mountYouTubePlayer(playerState.ytVideoId);
+        } else if (action === 'retry') {
+            playerState.errorRetried = true;
+            videoEl.load();
+        } else {
+            showMediaError(playerLib.mediaErrorMessage(code, playerState.mediaType === 'local') || 'This video could not play — check the link and try another video.');
+        }
+    });
+
+    // --- Live local-file sharing (second PeerJS call) --------------------
+    // The sender's playing file is captured into a MediaStream and sent
+    // over a second PeerJS call (metadata kind 'movie'); the receiver
+    // mounts that stream on the MAIN player — the big screen — not a call
+    // tile. The camera call does not exist here, so nothing else shares
+    // the link.
+    function partnerPeerId() {
+        return playerLib.partnerPeerIdForCall(isHost, connPeerId, roomCode);
+    }
+
+    function startMovieShare() {
+        if (!playerLib || !peer || peer.destroyed) return;
+        if (!conn || !conn.open) return;
+        if (playerState.mediaType !== 'local' || !playerState.localFileUrl || playerState.movieSharing) return;
+        if (typeof videoEl.captureStream !== 'function') {
+            showToast('This browser cannot share the video live — your partner needs the file to watch along.');
+            return;
+        }
+        var movieStream = null;
+        try {
+            movieStream = videoEl.captureStream(20);
+        } catch (e) {
+            showToast('This browser cannot share the video live — your partner needs the file to watch along.');
+            return;
+        }
+        var peerId = partnerPeerId();
+        if (!peerId) return;
+        var call = null;
+        try {
+            call = peer.call(peerId, movieStream, { metadata: { kind: 'movie', fileName: playerState.localFileName || '', title: playerState.mediaTitle || '' } });
+        } catch (e) {
+            return;
+        }
+        if (!call) return;
+        playerState.movieCall = call;
+        playerLib.capVideoSendBitrate(call, 800000);
+        playerState.movieSharing = true;
+        call.on('close', function () {
+            if (playerState.movieCall !== call) return;
+            playerState.movieCall = null;
+            playerState.movieSharing = false;
+            // Dropped, not stopped: re-share while we still have the file
+            // and the partner has not picked the same file meanwhile.
+            if (playerState.mediaType === 'local' && playerState.localFileUrl && conn && conn.open &&
+                !playerLib.partnerHasSameLocalFile(partnerMedia, playerState.localFileName, myPeerId)) {
+                setTimeout(function () { if (!playerState.movieSharing) startMovieShare(); }, 2000);
+            }
+        });
+        call.on('error', function (err) { console.error('Movie share error:', err); });
+        sendPeer({ kind: 'movie-share-start', by: userName, byPeer: myPeerId, at: Date.now(), fileName: playerState.localFileName || '', title: playerState.mediaTitle || '', duration: getPlayerDuration() });
+    }
+
+    function stopMovieShare(sendStop) {
+        if (!playerState.movieSharing && !playerState.movieCall) return;
+        // Clear the flag BEFORE closing: the close handler re-shares on a
+        // drop, and an intentional stop is not a drop.
+        playerState.movieSharing = false;
+        if (playerState.movieCall) {
+            var call = playerState.movieCall;
+            playerState.movieCall = null;
+            try { call.close(); } catch (e) {}
+        }
+        if (sendStop) sendPeer({ kind: 'movie-share-stop', by: userName, byPeer: myPeerId, at: Date.now() });
+    }
+
+    function attachMovieStream(stream, call) {
+        playerState.receivingMovie = true;
+        playerState.mediaType = 'movie';
+        playerState.movieCall = call || null;
+        hideMediaError();
+        videoEl.srcObject = stream;
+        showStage('video');
+        videoEl.play().catch(function (err) {
+            if (err && err.name === 'NotAllowedError') {
+                videoEl.muted = true;
+                videoEl.play().catch(function () {});
+                showUnmute();
+            }
+        });
+        updatePlayButtonUI(true);
+    }
+
+    function stopReceivingMovie(sendStop) {
+        if (!playerState.receivingMovie && !playerState.movieCall) return;
+        playerState.receivingMovie = false;
+        playerState.movieRemoteTime = null;
+        if (playerState.movieCall) {
+            try { playerState.movieCall.close(); } catch (e) {}
+            playerState.movieCall = null;
+        }
+        try { videoEl.srcObject = null; } catch (e) {}
+        videoEl.pause();
+        videoEl.classList.add('hidden');
+        videoEmpty.classList.remove('hidden');
+        updatePlayButtonUI(false);
+        if (sendStop) showToast('The shared movie ended.');
+    }
+
+    function sendMovieControl(action, currentTime) {
+        roomDebug.lastMovieControl = { action: action, currentTime: currentTime, at: Date.now() };
+        sendPeer({ kind: 'movie-control', by: userName, byPeer: myPeerId, at: Date.now(), action: action, currentTime: Number(currentTime) || 0 });
+    }
+
+    // Incoming movie calls arrive on the peer, not the data connection.
+    function handleIncomingCall(call) {
+        if (!playerLib || !playerLib.isMovieCall(call)) return;
+        try { call.answer(); } catch (e) { return; }
+        call.on('stream', function (stream) { attachMovieStream(stream, call); });
+        call.on('close', function () {
+            if (playerState.movieCall !== call) return;
+            stopReceivingMovie(false);
+        });
+        call.on('error', function (err) { console.error('Movie call error:', err); });
+    }
+
     // --- Poll fallback (PeerJS down? links still arrive) ---------------
     var knownIds = new Set();
     shelf.querySelectorAll('li[data-id]').forEach(function (li) { knownIds.add(li.dataset.id); });
@@ -399,6 +1205,48 @@
             var y = Number(msg.y) || 0;
             roomDebug.lastPartnerScroll = { x: x, y: y, at: Date.now() };
             postWebScrollTo(x, y);
+        } else if (msg.kind === 'media' && msg.type && msg.url) {
+            // The partner picked a video — mount the same one. The id
+            // guard drops a duplicate delivery of the one already on
+            // screen.
+            if (msg.id && msg.id === playerState.mediaId) return;
+            partnerMedia = { type: msg.type, url: msg.url, title: msg.title, updatedBy: msg.byPeer };
+            // Partner picked the same local file we are sharing — they
+            // have the file, so the stream is redundant.
+            if (msg.type === 'local' && playerState.movieSharing && playerLib &&
+                playerLib.partnerHasSameLocalFile(partnerMedia, playerState.localFileName, myPeerId)) {
+                stopMovieShare(false);
+            }
+            mountMedia({ id: msg.id || null, type: msg.type, url: msg.url, title: msg.title });
+            showToast((msg.by || 'Your partner') + ' shared a video.');
+        } else if (msg.kind === 'playback') {
+            applyRemotePlayback(msg);
+        } else if (msg.kind === 'movie-share-start') {
+            // The partner started streaming their file. The 'media'
+            // message just before this already showed the waiting state;
+            // this is the belt-and-braces path for a share that started
+            // without one (or after a re-share).
+            if (playerState.receivingMovie) return;
+            if (playerState.mediaType === 'local' && playerState.localFileName && playerState.localFileName === msg.fileName) return;
+            mountMedia({ id: null, type: 'local', url: msg.fileName || '', title: msg.title || '' });
+            if (msg.duration) {
+                playerState.movieRemoteTime = { currentTime: 0, duration: Number(msg.duration) || 0, isPlaying: true, at: Date.now() };
+                updateTimelineUI();
+            }
+        } else if (msg.kind === 'movie-share-stop') {
+            if (playerState.receivingMovie) {
+                stopReceivingMovie(false);
+                showToast('The shared movie ended.');
+            }
+        } else if (msg.kind === 'movie-control') {
+            // The partner is watching our shared file and pressed a
+            // transport control — they have no file of their own, so
+            // drive ours.
+            roomDebug.lastMovieControl = msg;
+            if (!playerState.movieSharing) return;
+            if (msg.action === 'play') { playerState.userPlayIntent = true; executeLocalPlay(); }
+            else if (msg.action === 'pause') executeLocalPause();
+            else if (msg.action === 'seek' && typeof msg.currentTime === 'number') executeLocalSeek(msg.currentTime);
         }
     }
     roomDebug.handlePeerMessage = handlePeerMessage;
@@ -406,6 +1254,7 @@
     function attachConn(c) {
         if (conn) { try { conn.close(); } catch (e) {} }
         conn = c;
+        connPeerId = c.peer || null;
         conn.on('open', function () { setPresence('live', 'Live Synced'); });
         conn.on('data', handlePeerMessage);
         conn.on('close', function () { setPresence('offline', 'Sync Offline'); });
@@ -432,13 +1281,23 @@
             setPresence('offline', 'Sync Offline');
             return;
         }
-        peer.on('open', function () { setPresence('live', 'Live Synced'); });
+        peer.on('open', function (id) {
+            myPeerId = id;
+            isHost = id === 'c2t-' + roomCode;
+            setPresence('live', 'Live Synced');
+        });
         peer.on('connection', attachConn);
+        peer.on('call', handleIncomingCall);
         peer.on('error', function (err) {
             if (err && err.type === 'unavailable-id') {
                 try { peer.destroy(); } catch (e) {}
                 peer = new Peer('c2t-guest-' + Math.random().toString(36).slice(2, 8));
-                peer.on('open', function () { connectToHost(); });
+                peer.on('open', function (id) {
+                    myPeerId = id;
+                    isHost = false;
+                    connectToHost();
+                });
+                peer.on('call', handleIncomingCall);
                 peer.on('error', function () { setPresence('offline', 'Sync Offline'); });
             } else {
                 setPresence('offline', 'Sync Offline');
@@ -452,4 +1311,27 @@
 
     setupPeer();
     if (currentUrl) armBlockedTimer();
+    // The room's saved video mounts on load, paused at the start — the
+    // partner's live position is not stored server-side, so a late joiner
+    // presses Play to catch up. A saved local file has no stream any
+    // more; say so instead of mounting a dead player.
+    (function mountCurrentMediaOnLoad() {
+        if (!playerLib) return;
+        var type = root.dataset.currentMediaType || '';
+        var url = root.dataset.currentMediaUrl || '';
+        if (!type || !url) return;
+        if (type === 'local') {
+            videoEmpty.classList.remove('hidden');
+            var p = videoEmpty.querySelector('p:last-child');
+            if (p) p.textContent = 'Your partner shared the file “' + url + '” earlier — ask them to pick it again to watch it together.';
+            nowPlayingTitle.textContent = url;
+            return;
+        }
+        mountMedia({
+            id: root.dataset.currentMediaId ? parseInt(root.dataset.currentMediaId, 10) : null,
+            type: type,
+            url: url,
+            title: root.dataset.currentMediaTitle || '',
+        });
+    })();
 })();

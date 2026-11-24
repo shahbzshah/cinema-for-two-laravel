@@ -57,10 +57,13 @@ class RoomController extends Controller
         }
         $current ??= $weblinks->first();
 
+        $currentMedia = $room->latestMedia();
+
         return view('rooms.show', [
             'room' => $room,
             'weblinks' => $weblinks,
             'current' => $current,
+            'currentMedia' => $currentMedia,
         ]);
     }
 }
